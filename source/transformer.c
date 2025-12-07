@@ -1,5 +1,5 @@
-#include "safetensors.h"
 #include "transformer.h"
+#include "safetensors.h"
 #include "util.h"
 #include <ctype.h>
 #include <math.h>
@@ -8,10 +8,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <sys/mman.h>   // for mmap(), munmap(), PROT_*, MAP_* constants
-#include <sys/types.h>  // for size_t, off_t
-#include <fcntl.h>      // for open() and O_* flags
-#include <unistd.h>     // for close()
+#include <fcntl.h>     // for open() and O_* flags
+#include <sys/mman.h>  // for mmap(), munmap(), PROT_*, MAP_* constants
+#include <sys/types.h> // for size_t, off_t
+#include <unistd.h>    // for close()
 
 // Create a transformer_configuration_t structure from a safetensors_t
 static transformer_configuration_t* configuration_from_safetensors(
@@ -82,19 +82,9 @@ static transformer_state_t* state_from_safetensors(safetensors_t* t) {
   s->rope_cos_sin = aligned_alloc(UTIL_ALIGNMENT, rope_cos_sin_size);
 
   // Ensure all mallocs went fine
-  if (!s->embedding ||
-      !s->mha_norm ||
-      !s->mha_q ||
-      !s->mha_score ||
-      !s->mha_att ||
-      !s->mha_out ||
-      !s->ffn_norm ||
-      !s->ffn_fc ||
-      !s->ffn_up ||
-      !s->ffn_out ||
-      !s->logits ||
-      !s->k_cache ||
-      !s->v_cache ||
+  if (!s->embedding || !s->mha_norm || !s->mha_q || !s->mha_score ||
+      !s->mha_att || !s->mha_out || !s->ffn_norm || !s->ffn_fc || !s->ffn_up ||
+      !s->ffn_out || !s->logits || !s->k_cache || !s->v_cache ||
       !s->rope_cos_sin) {
     UTIL_DIE("failed to malloc for activations");
   }
@@ -588,17 +578,10 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
   }
 
   // Ensure all mallocs went fine
-  if (!w->embedding_weight ||
-      !w->mha_norm_weight ||
-      !w->mha_q_weight ||
-      !w->mha_k_weight ||
-      !w->mha_v_weight ||
-      !w->mha_out_weight ||
-      !w->ffn_norm_weight ||
-      !w->ffn_fc_weight ||
-      !w->ffn_up_weight ||
-      !w->ffn_out_weight ||
-      !w->out_norm_weight ||
+  if (!w->embedding_weight || !w->mha_norm_weight || !w->mha_q_weight ||
+      !w->mha_k_weight || !w->mha_v_weight || !w->mha_out_weight ||
+      !w->ffn_norm_weight || !w->ffn_fc_weight || !w->ffn_up_weight ||
+      !w->ffn_out_weight || !w->out_norm_weight ||
       (!w->out_weight && !is_out_weigth_aliased)) {
     UTIL_DIE("failed to malloc for weights");
   }
@@ -862,9 +845,7 @@ static void softmax(
 #ifdef __ARM_NEON
 #include <arm_neon.h>
 static inline float dot(
-  size_t len,
-  float activation[restrict len],
-  uint16_t weight[restrict len]
+    size_t len, float activation[restrict len], uint16_t weight[restrict len]
 ) {
   float32x4_t dot_0 = vdupq_n_f32(0.0);
   float32x4_t dot_1 = vdupq_n_f32(0.0);
@@ -873,9 +854,9 @@ static inline float dot(
 
   for (size_t i = 0; i < len; i += 16) {
     // Read 16 float32 activations
-    float32x4_t activation_0 = vld1q_f32(&activation[i +  0]);
-    float32x4_t activation_1 = vld1q_f32(&activation[i +  4]);
-    float32x4_t activation_2 = vld1q_f32(&activation[i +  8]);
+    float32x4_t activation_0 = vld1q_f32(&activation[i + 0]);
+    float32x4_t activation_1 = vld1q_f32(&activation[i + 4]);
+    float32x4_t activation_2 = vld1q_f32(&activation[i + 8]);
     float32x4_t activation_3 = vld1q_f32(&activation[i + 12]);
 
     // Read 16 BF16 weights and expand them to float32
@@ -919,31 +900,29 @@ static inline float dot(
 #elif defined __AVX2__
 #include <immintrin.h>
 static inline float dot(
-  size_t len,
-  float activation[restrict len],
-  uint16_t weight[restrict len]
+    size_t len, float activation[restrict len], uint16_t weight[restrict len]
 ) {
   __m256 dot_0 = _mm256_setzero_ps();
   __m256 dot_1 = _mm256_setzero_ps();
   __m256 dot_2 = _mm256_setzero_ps();
   __m256 dot_3 = _mm256_setzero_ps();
 
-  float *a = __builtin_assume_aligned(activation, 32);
-  uint16_t *w = __builtin_assume_aligned(weight, 32);
+  float* a = __builtin_assume_aligned(activation, 32);
+  uint16_t* w = __builtin_assume_aligned(weight, 32);
 
   for (size_t i = 0; i < len; i += 32) {
     // Read 32 float32 activations
-    __m256 activation_0 = _mm256_load_ps(&a[i +  0]);
-    __m256 activation_1 = _mm256_load_ps(&a[i +  8]);
+    __m256 activation_0 = _mm256_load_ps(&a[i + 0]);
+    __m256 activation_1 = _mm256_load_ps(&a[i + 8]);
     __m256 activation_2 = _mm256_load_ps(&a[i + 16]);
     __m256 activation_3 = _mm256_load_ps(&a[i + 24]);
 
     // Read 32 BF16 weights and expand them to float32
     // - Load BF16 vectors as int32
-    __m128i u16_0 = _mm_load_si128((const __m128i *)&w[i +  0]);
-    __m128i u16_1 = _mm_load_si128((const __m128i *)&w[i +  8]);
-    __m128i u16_2 = _mm_load_si128((const __m128i *)&w[i + 16]);
-    __m128i u16_3 = _mm_load_si128((const __m128i *)&w[i + 24]);
+    __m128i u16_0 = _mm_load_si128((const __m128i*)&w[i + 0]);
+    __m128i u16_1 = _mm_load_si128((const __m128i*)&w[i + 8]);
+    __m128i u16_2 = _mm_load_si128((const __m128i*)&w[i + 16]);
+    __m128i u16_3 = _mm_load_si128((const __m128i*)&w[i + 24]);
     // - Zero-extend u16 values to u32 (BF16 bits in the low 16 bits for now)
     __m256i u32_0 = _mm256_cvtepu16_epi32(u16_0);
     __m256i u32_1 = _mm256_cvtepu16_epi32(u16_1);
@@ -980,20 +959,18 @@ static inline float dot(
   __m256 sum256 = _mm256_add_ps(dot_01, dot_23);
   // No "sum all lanes" instruction like vaddvq_f32 on ARM, so work a bit
   // sum256 holds 8 floats: s0 s1 s2 s3 s4 s5 s6 s7 (below G: garbage)
-  __m128 lo = _mm256_castps256_ps128(sum256); // s0 s1 s2 s3
+  __m128 lo = _mm256_castps256_ps128(sum256);   // s0 s1 s2 s3
   __m128 hi = _mm256_extractf128_ps(sum256, 1); // s3 s4 s5 s6 s7
-  __m128 sum128 = _mm_add_ps(lo, hi); // s0+s4 s1+s5 s2+s6 s3+s7
-  __m128 shuf = _mm_movehdup_ps(sum128); // s1+s5 s1+s5 s3+s7 s3+s7
-  __m128 sums = _mm_add_ps(sum128, shuf); // s0+s4+s1+s5 G s2+s6+s3+s7 G
-  shuf = _mm_movehl_ps(shuf, sums); // s2+s6+s3+s7 G G G
-  sums = _mm_add_ss(sums, shuf); // s0+s4+s1+s5+s2+s6+s3+s7 G G G
-  return _mm_cvtss_f32(sums); // extract total
+  __m128 sum128 = _mm_add_ps(lo, hi);           // s0+s4 s1+s5 s2+s6 s3+s7
+  __m128 shuf = _mm_movehdup_ps(sum128);        // s1+s5 s1+s5 s3+s7 s3+s7
+  __m128 sums = _mm_add_ps(sum128, shuf);       // s0+s4+s1+s5 G s2+s6+s3+s7 G
+  shuf = _mm_movehl_ps(shuf, sums);             // s2+s6+s3+s7 G G G
+  sums = _mm_add_ss(sums, shuf);                // s0+s4+s1+s5+s2+s6+s3+s7 G G G
+  return _mm_cvtss_f32(sums);                   // extract total
 }
 #else
 static inline float dot(
-  size_t len,
-  float activation[restrict len],
-  uint16_t weight[restrict len]
+    size_t len, float activation[restrict len], uint16_t weight[restrict len]
 ) {
   float dot = 0.;
   for (size_t i = 0; i < len; i++) {
@@ -1186,7 +1163,7 @@ static void transformer_predict_chunk(
       for (size_t e = 0; e < embedding_dim; e++) {
         mha_out[t][e] =
             dot(q_head_count * head_dim,
-                ((float (*)[q_head_count * head_dim])mha_att)[t],
+                ((float (*)[q_head_count * head_dim]) mha_att)[t],
                 mha_out_weight[l][e]);
       }
     }
@@ -1246,7 +1223,7 @@ static void transformer_predict_chunk(
       }
     }
 
-    #ifdef DEBUG
+#ifdef DEBUG
     if (l == 0 || l == layer_count - 1) {
       size_t mha_len = token_count * embedding_dim;
       size_t att_len = token_count * q_head_count * head_dim;
@@ -1264,17 +1241,12 @@ static void transformer_predict_chunk(
       util_matrix_summary("-    ffn_up", 1, hidden_len, 3, (float*)ffn_up);
       util_matrix_summary("-   ffn_out", 1, mha_len, 3, (float*)ffn_out);
     }
-    #endif
+#endif
   }
 
   // Final rmsnorm
   rmsnorm(
-      token_count,
-      embedding_dim,
-      embedding,
-      embedding,
-      out_norm_weight,
-      epsilon
+      token_count, embedding_dim, embedding, embedding, out_norm_weight, epsilon
   );
 
   // Classifier into logits
@@ -1373,7 +1345,8 @@ void transformer_predict(
                      [embedding_dim])w->mha_q_weight,
         (uint16_t (*)[kv_head_count][head_dim][embedding_dim])w->mha_k_weight,
         (uint16_t (*)[kv_head_count][head_dim][embedding_dim])w->mha_v_weight,
-        (uint16_t (*)[embedding_dim][q_head_count * head_dim])w->mha_out_weight,
+        (uint16_t (*)[embedding_dim][q_head_count * head_dim])
+            w->mha_out_weight,
         (uint16_t (*)[embedding_dim])w->ffn_norm_weight,
         (uint16_t (*)[hidden_dim][embedding_dim])w->ffn_fc_weight,
         (uint16_t (*)[hidden_dim][embedding_dim])w->ffn_up_weight,
