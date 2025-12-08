@@ -1074,21 +1074,13 @@ static void transformer_predict_chunk(
     }
 
     // K matmul for all KV-heads, storing in the k_cache
+    // + V matmul for all KV-heads, storing in the v_cache
 #pragma omp parallel for collapse(3)
     for (size_t k = 0; k < kv_head_count; k++) {
       for (size_t t = 0; t < token_count; t++) {
         for (size_t h = 0; h < head_dim; h++) {
           k_cache[l][k][cached_count + t][h] =
               dot(embedding_dim, mha_norm[t], mha_k_weight[l][k][h]);
-        }
-      }
-    }
-
-    // V matmul for all KV-heads, storing in the v_cache
-#pragma omp parallel for collapse(3)
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t t = 0; t < token_count; t++) {
-        for (size_t h = 0; h < head_dim; h++) {
           v_cache[l][k][cached_count + t][h] =
               dot(embedding_dim, mha_norm[t], mha_v_weight[l][k][h]);
         }
@@ -1166,6 +1158,7 @@ static void transformer_predict_chunk(
     // Final matmul to get the output of the attention
     // Note we reshape mha_att[t][k][q][h] to mha_att[t][kqh] with
     // 0 <= kqh < embedding_dim (just casting because memory layout is ok)
+    // + Residual connection back into x
 #pragma omp parallel for collapse(2)
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < embedding_dim; e++) {
@@ -1173,13 +1166,6 @@ static void transformer_predict_chunk(
             dot(q_head_count * head_dim,
                 ((float (*)[q_head_count * head_dim]) mha_att)[t],
                 mha_out_weight[l][e]);
-      }
-    }
-
-    // Residual connection back into x
-#pragma omp parallel for collapse(2)
-    for (size_t t = 0; t < token_count; t++) {
-      for (size_t e = 0; e < embedding_dim; e++) {
         embedding[t][e] += mha_out[t][e];
       }
     }
@@ -1195,44 +1181,26 @@ static void transformer_predict_chunk(
     );
 
     // Feed-forward's fully-connected matmul (a.k.a. gate)
+    // + Feed-forward's up matmul
+    // + SwiGLU non-linearity
 #pragma omp parallel for collapse(2)
     for (size_t t = 0; t < token_count; t++) {
       for (size_t h = 0; h < hidden_dim; h++) {
         ffn_fc[t][h] = dot(embedding_dim, ffn_norm[t], ffn_fc_weight[l][h]);
-      }
-    }
-
-    // Feed-forward's up matmul
-#pragma omp parallel for collapse(2)
-    for (size_t t = 0; t < token_count; t++) {
-      for (size_t h = 0; h < hidden_dim; h++) {
         ffn_up[t][h] = dot(embedding_dim, ffn_norm[t], ffn_up_weight[l][h]);
-      }
-    }
-
-    // SwiGLU non-linearity
-#pragma omp parallel for collapse(2)
-    for (size_t t = 0; t < token_count; t++) {
-      for (size_t e = 0; e < hidden_dim; e++) {
         // SiLU(x)=x*σ(x), where σ(x) is the logistic sigmoid
-        ffn_fc[t][e] *= (1.0f / (1.0f + expf(-ffn_fc[t][e])));
+        ffn_fc[t][h] *= (1.0f / (1.0f + expf(-ffn_fc[t][h])));
         // Elementwise multiply with ffn_up_weight(x)
-        ffn_fc[t][e] *= ffn_up[t][e];
+        ffn_fc[t][h] *= ffn_up[t][h];
       }
     }
 
     // Final matmul to get the output of the feed-forward network
+    // + Residual connection
 #pragma omp parallel for collapse(2)
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < embedding_dim; e++) {
         ffn_out[t][e] = dot(hidden_dim, ffn_fc[t], ffn_out_weight[l][e]);
-      }
-    }
-
-    // Residual connection
-#pragma omp parallel for collapse(2)
-    for (size_t t = 0; t < token_count; t++) {
-      for (size_t e = 0; e < embedding_dim; e++) {
         embedding[t][e] += ffn_out[t][e];
       }
     }
