@@ -789,6 +789,7 @@ static void rmsnorm(
     uint16_t w[embedding_dim],
     float epsilon
 ) {
+#pragma omp for
   for (size_t i = 0; i < sequence_len; i++) {
     // Calculate sum of squares
     float ss = 0.0f;
