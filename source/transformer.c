@@ -1041,205 +1041,215 @@ static void transformer_predict_chunk(
 ) {
   (void)q_head_count; // Unused except in debug mode
 
-  // Convert token ids to embedding vector representation
-#pragma omp parallel for collapse(2)
-  for (size_t t = 0; t < token_count; t++) {
-    for (size_t e = 0; e < embedding_dim; e++) {
-      embedding[t][e] = util_bf16_to_f32(embedding_weight[token[t]][e]);
+#pragma omp parallel
+  {
+    // Convert token ids to embedding vector representation
+#pragma omp for collapse(2)
+    for (size_t t = 0; t < token_count; t++) {
+      for (size_t e = 0; e < embedding_dim; e++) {
+        embedding[t][e] = util_bf16_to_f32(embedding_weight[token[t]][e]);
+      }
     }
-  }
 
-  // Execute decoder layers
-  for (size_t l = 0; l < layer_count; l++) {
-    // Attention rmsnorm: normalize the embedding vectors for the current layer
-    rmsnorm(
-        token_count,
-        embedding_dim,
-        mha_norm,
-        embedding,
-        mha_norm_weight[l],
-        epsilon
-    );
+    // Execute decoder layers
+    for (size_t l = 0; l < layer_count; l++) {
+      // Attention rmsnorm: normalize the embedding vectors for the current
+      // layer
+      rmsnorm(
+          token_count,
+          embedding_dim,
+          mha_norm,
+          embedding,
+          mha_norm_weight[l],
+          epsilon
+      );
 
-    // Q matmul for all Q-heads
-#pragma omp parallel for collapse(4)
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
-        for (size_t t = 0; t < token_count; t++) {
-          for (size_t h = 0; h < head_dim; h++) {
-            mha_q[k][q][t][h] =
-                dot(embedding_dim, mha_norm[t], mha_q_weight[l][k][q][h]);
+      // Q matmul for all Q-heads
+#pragma omp for collapse(4)
+      for (size_t k = 0; k < kv_head_count; k++) {
+        for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
+          for (size_t t = 0; t < token_count; t++) {
+            for (size_t h = 0; h < head_dim; h++) {
+              mha_q[k][q][t][h] =
+                  dot(embedding_dim, mha_norm[t], mha_q_weight[l][k][q][h]);
+            }
           }
         }
       }
-    }
 
-    // K matmul for all KV-heads, storing in the k_cache
-    // + V matmul for all KV-heads, storing in the v_cache
-#pragma omp parallel for collapse(3)
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t t = 0; t < token_count; t++) {
-        for (size_t h = 0; h < head_dim; h++) {
-          k_cache[l][k][cached_count + t][h] =
-              dot(embedding_dim, mha_norm[t], mha_k_weight[l][k][h]);
-          v_cache[l][k][cached_count + t][h] =
-              dot(embedding_dim, mha_norm[t], mha_v_weight[l][k][h]);
+      // K matmul for all KV-heads, storing in the k_cache
+      // + V matmul for all KV-heads, storing in the v_cache
+#pragma omp for collapse(3)
+      for (size_t k = 0; k < kv_head_count; k++) {
+        for (size_t t = 0; t < token_count; t++) {
+          for (size_t h = 0; h < head_dim; h++) {
+            k_cache[l][k][cached_count + t][h] =
+                dot(embedding_dim, mha_norm[t], mha_k_weight[l][k][h]);
+            v_cache[l][k][cached_count + t][h] =
+                dot(embedding_dim, mha_norm[t], mha_v_weight[l][k][h]);
+          }
         }
       }
-    }
 
-    // RoPE Q for all Q-heads: complex-valued rotate Q in each head
-#pragma omp parallel for collapse(4)
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
+      // RoPE Q for all Q-heads: complex-valued rotate Q in each head
+#pragma omp for collapse(4)
+      for (size_t k = 0; k < kv_head_count; k++) {
+        for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
+          for (size_t t = 0; t < token_count; t++) {
+            for (size_t h = 0; h < head_dim; h += 2) {
+              float fr = rope_cos_sin[cached_count + t][h + 0];
+              float fi = rope_cos_sin[cached_count + t][h + 1];
+              float v0 = mha_q[k][q][t][h + 0];
+              float v1 = mha_q[k][q][t][h + 1];
+              mha_q[k][q][t][h + 0] = v0 * fr - v1 * fi;
+              mha_q[k][q][t][h + 1] = v0 * fi + v1 * fr;
+            }
+          }
+        }
+      }
+
+      // RoPE K for all KV-heads: complex-valued rotate K in each head
+#pragma omp for collapse(3)
+      for (size_t k = 0; k < kv_head_count; k++) {
         for (size_t t = 0; t < token_count; t++) {
           for (size_t h = 0; h < head_dim; h += 2) {
             float fr = rope_cos_sin[cached_count + t][h + 0];
             float fi = rope_cos_sin[cached_count + t][h + 1];
-            float v0 = mha_q[k][q][t][h + 0];
-            float v1 = mha_q[k][q][t][h + 1];
-            mha_q[k][q][t][h + 0] = v0 * fr - v1 * fi;
-            mha_q[k][q][t][h + 1] = v0 * fi + v1 * fr;
+            float v0 = k_cache[l][k][cached_count + t][h + 0];
+            float v1 = k_cache[l][k][cached_count + t][h + 1];
+            k_cache[l][k][cached_count + t][h + 0] = v0 * fr - v1 * fi;
+            k_cache[l][k][cached_count + t][h + 1] = v0 * fi + v1 * fr;
           }
         }
       }
-    }
 
-    // RoPE K for all KV-heads: complex-valued rotate K in each head
-#pragma omp parallel for collapse(3)
-    for (size_t k = 0; k < kv_head_count; k++) {
+      // Multihead attention. iterate over all Q-heads
+#pragma omp for collapse(2)
+      for (size_t k = 0; k < kv_head_count; k++) {
+        for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
+          for (size_t t = 0; t < token_count; t++) {
+            // Calculate the attention score: QKˆT / sqrt(head_dim)
+            // Here we don't use mask but a triangular loop (no compute
+            // for future tokens)
+            for (size_t p = 0; p < cached_count + t + 1; p++) {
+              mha_score[k][q][t][p] = 0.0f;
+              for (size_t h = 0; h < head_dim; h++) {
+                mha_score[k][q][t][p] +=
+                    mha_q[k][q][t][h] * k_cache[l][k][p][h];
+              }
+              mha_score[k][q][t][p] /= sqrtf(head_dim);
+            }
+          }
+
+          // Softmax the scores to get attention weights
+          softmax(token_count, cached_count, context_len, mha_score[k][q]);
+
+          for (size_t t = 0; t < token_count; t++) {
+            // Weighted sum of the values, here the access function of
+            // mha_att is to please the output matmul
+            for (size_t h = 0; h < head_dim; h++) {
+              mha_att[t][k][q][h] = 0.0f;
+            }
+            for (size_t p = 0; p <= cached_count + t; p++) {
+              for (size_t h = 0; h < head_dim; h++) {
+                mha_att[t][k][q][h] +=
+                    mha_score[k][q][t][p] * v_cache[l][k][p][h];
+              }
+            }
+          }
+        }
+      }
+
+      // Final matmul to get the output of the attention
+      // Note we reshape mha_att[t][k][q][h] to mha_att[t][kqh] with
+      // 0 <= kqh < embedding_dim (just casting because memory layout is ok)
+      // + Residual connection back into x
+#pragma omp for collapse(2)
       for (size_t t = 0; t < token_count; t++) {
-        for (size_t h = 0; h < head_dim; h += 2) {
-          float fr = rope_cos_sin[cached_count + t][h + 0];
-          float fi = rope_cos_sin[cached_count + t][h + 1];
-          float v0 = k_cache[l][k][cached_count + t][h + 0];
-          float v1 = k_cache[l][k][cached_count + t][h + 1];
-          k_cache[l][k][cached_count + t][h + 0] = v0 * fr - v1 * fi;
-          k_cache[l][k][cached_count + t][h + 1] = v0 * fi + v1 * fr;
+        for (size_t e = 0; e < embedding_dim; e++) {
+          mha_out[t][e] =
+              dot(q_head_count * head_dim,
+                  ((float (*)[q_head_count * head_dim]) mha_att)[t],
+                  mha_out_weight[l][e]);
+          embedding[t][e] += mha_out[t][e];
         }
       }
-    }
 
-    // Multihead attention. iterate over all Q-heads
-#pragma omp parallel for collapse(2)
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
-        for (size_t t = 0; t < token_count; t++) {
-          // Calculate the attention score: QKˆT / sqrt(head_dim)
-          // Here we don't use mask but a triangular loop (no compute
-          // for future tokens)
-          for (size_t p = 0; p < cached_count + t + 1; p++) {
-            mha_score[k][q][t][p] = 0.0f;
-            for (size_t h = 0; h < head_dim; h++) {
-              mha_score[k][q][t][p] += mha_q[k][q][t][h] * k_cache[l][k][p][h];
-            }
-            mha_score[k][q][t][p] /= sqrtf(head_dim);
-          }
-        }
+      // Feed-forward network's rmsnorm
+      rmsnorm(
+          token_count,
+          embedding_dim,
+          ffn_norm,
+          embedding,
+          ffn_norm_weight[l],
+          epsilon
+      );
 
-        // Softmax the scores to get attention weights
-        softmax(token_count, cached_count, context_len, mha_score[k][q]);
-
-        for (size_t t = 0; t < token_count; t++) {
-          // Weighted sum of the values, here the access function of
-          // mha_att is to please the output matmul
-          for (size_t h = 0; h < head_dim; h++) {
-            mha_att[t][k][q][h] = 0.0f;
-          }
-          for (size_t p = 0; p <= cached_count + t; p++) {
-            for (size_t h = 0; h < head_dim; h++) {
-              mha_att[t][k][q][h] +=
-                  mha_score[k][q][t][p] * v_cache[l][k][p][h];
-            }
-          }
+      // Feed-forward's fully-connected matmul (a.k.a. gate)
+      // + Feed-forward's up matmul
+      // + SwiGLU non-linearity
+#pragma omp for collapse(2)
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t h = 0; h < hidden_dim; h++) {
+          ffn_fc[t][h] = dot(embedding_dim, ffn_norm[t], ffn_fc_weight[l][h]);
+          ffn_up[t][h] = dot(embedding_dim, ffn_norm[t], ffn_up_weight[l][h]);
+          // SiLU(x)=x*σ(x), where σ(x) is the logistic sigmoid
+          ffn_fc[t][h] *= (1.0f / (1.0f + expf(-ffn_fc[t][h])));
+          // Elementwise multiply with ffn_up_weight(x)
+          ffn_fc[t][h] *= ffn_up[t][h];
         }
       }
-    }
 
-    // Final matmul to get the output of the attention
-    // Note we reshape mha_att[t][k][q][h] to mha_att[t][kqh] with
-    // 0 <= kqh < embedding_dim (just casting because memory layout is ok)
-    // + Residual connection back into x
-#pragma omp parallel for collapse(2)
-    for (size_t t = 0; t < token_count; t++) {
-      for (size_t e = 0; e < embedding_dim; e++) {
-        mha_out[t][e] =
-            dot(q_head_count * head_dim,
-                ((float (*)[q_head_count * head_dim]) mha_att)[t],
-                mha_out_weight[l][e]);
-        embedding[t][e] += mha_out[t][e];
+      // Final matmul to get the output of the feed-forward network
+      // + Residual connection
+#pragma omp for collapse(2)
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t e = 0; e < embedding_dim; e++) {
+          ffn_out[t][e] = dot(hidden_dim, ffn_fc[t], ffn_out_weight[l][e]);
+          embedding[t][e] += ffn_out[t][e];
+        }
       }
+
+#ifdef DEBUG
+      if (l == 0 || l == layer_count - 1) {
+        size_t mha_len = token_count * embedding_dim;
+        size_t att_len = token_count * q_head_count * head_dim;
+        size_t hidden_len = token_count * hidden_dim;
+        size_t score_len = q_head_count * token_count * context_len;
+        fprintf(stderr, "Transformer state at layer %zu:\n", l);
+        util_matrix_summary("- embedding", 1, mha_len, 3, (float*)embedding);
+        util_matrix_summary("-  mha_norm", 1, mha_len, 3, (float*)mha_norm);
+        util_matrix_summary("-     mha_q", 1, mha_len, 3, (float*)mha_q);
+        util_matrix_summary("- mha_score", 1, score_len, 3, (float*)mha_score);
+        util_matrix_summary("-   mha_att", 1, att_len, 3, (float*)mha_att);
+        util_matrix_summary("-   mha_out", 1, mha_len, 3, (float*)mha_out);
+        util_matrix_summary("-  ffn_norm", 1, mha_len, 3, (float*)ffn_norm);
+        util_matrix_summary("-    ffn_fc", 1, hidden_len, 3, (float*)ffn_fc);
+        util_matrix_summary("-    ffn_up", 1, hidden_len, 3, (float*)ffn_up);
+        util_matrix_summary("-   ffn_out", 1, mha_len, 3, (float*)ffn_out);
+      }
+#endif
     }
 
-    // Feed-forward network's rmsnorm
+    // Final rmsnorm
     rmsnorm(
         token_count,
         embedding_dim,
-        ffn_norm,
         embedding,
-        ffn_norm_weight[l],
+        embedding,
+        out_norm_weight,
         epsilon
     );
 
-    // Feed-forward's fully-connected matmul (a.k.a. gate)
-    // + Feed-forward's up matmul
-    // + SwiGLU non-linearity
-#pragma omp parallel for collapse(2)
-    for (size_t t = 0; t < token_count; t++) {
-      for (size_t h = 0; h < hidden_dim; h++) {
-        ffn_fc[t][h] = dot(embedding_dim, ffn_norm[t], ffn_fc_weight[l][h]);
-        ffn_up[t][h] = dot(embedding_dim, ffn_norm[t], ffn_up_weight[l][h]);
-        // SiLU(x)=x*σ(x), where σ(x) is the logistic sigmoid
-        ffn_fc[t][h] *= (1.0f / (1.0f + expf(-ffn_fc[t][h])));
-        // Elementwise multiply with ffn_up_weight(x)
-        ffn_fc[t][h] *= ffn_up[t][h];
+    // Classifier into logits
+#pragma omp for collapse(2)
+    for (size_t l = 0; l < logits_count; l++) {
+      for (size_t v = 0; v < vocabulary_len; v++) {
+        logits[l][v] =
+            dot(embedding_dim,
+                embedding[l + token_count - logits_count],
+                out_weight[v]);
       }
-    }
-
-    // Final matmul to get the output of the feed-forward network
-    // + Residual connection
-#pragma omp parallel for collapse(2)
-    for (size_t t = 0; t < token_count; t++) {
-      for (size_t e = 0; e < embedding_dim; e++) {
-        ffn_out[t][e] = dot(hidden_dim, ffn_fc[t], ffn_out_weight[l][e]);
-        embedding[t][e] += ffn_out[t][e];
-      }
-    }
-
-#ifdef DEBUG
-    if (l == 0 || l == layer_count - 1) {
-      size_t mha_len = token_count * embedding_dim;
-      size_t att_len = token_count * q_head_count * head_dim;
-      size_t hidden_len = token_count * hidden_dim;
-      size_t score_len = q_head_count * token_count * context_len;
-      fprintf(stderr, "Transformer state at layer %zu:\n", l);
-      util_matrix_summary("- embedding", 1, mha_len, 3, (float*)embedding);
-      util_matrix_summary("-  mha_norm", 1, mha_len, 3, (float*)mha_norm);
-      util_matrix_summary("-     mha_q", 1, mha_len, 3, (float*)mha_q);
-      util_matrix_summary("- mha_score", 1, score_len, 3, (float*)mha_score);
-      util_matrix_summary("-   mha_att", 1, att_len, 3, (float*)mha_att);
-      util_matrix_summary("-   mha_out", 1, mha_len, 3, (float*)mha_out);
-      util_matrix_summary("-  ffn_norm", 1, mha_len, 3, (float*)ffn_norm);
-      util_matrix_summary("-    ffn_fc", 1, hidden_len, 3, (float*)ffn_fc);
-      util_matrix_summary("-    ffn_up", 1, hidden_len, 3, (float*)ffn_up);
-      util_matrix_summary("-   ffn_out", 1, mha_len, 3, (float*)ffn_out);
-    }
-#endif
-  }
-
-  // Final rmsnorm
-  rmsnorm(
-      token_count, embedding_dim, embedding, embedding, out_norm_weight, epsilon
-  );
-
-  // Classifier into logits
-#pragma omp parallel for collapse(2)
-  for (size_t l = 0; l < logits_count; l++) {
-    for (size_t v = 0; v < vocabulary_len; v++) {
-      logits[l][v] =
-          dot(embedding_dim,
-              embedding[l + token_count - logits_count],
-              out_weight[v]);
     }
   }
 }
