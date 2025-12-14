@@ -13,18 +13,18 @@
 #include <sys/resource.h>
 
 #ifdef PARALLEL
-#include <omp.h>
 #include <mpi.h>
+#include <omp.h>
 #else
-#define MPI_SUCCESS            0
-#define MPI_COMM_WORLD         0
-#define omp_get_thread_num()   0
-#define omp_get_num_threads()  1
+#define MPI_SUCCESS           0
+#define MPI_COMM_WORLD        0
+#define omp_get_thread_num()  0
+#define omp_get_num_threads() 1
 #define omp_set_num_threads(a)
-#define MPI_Init(a, b)         MPI_SUCCESS
-#define MPI_Comm_rank(a, b)    (*(b) = 0, MPI_SUCCESS)
-#define MPI_Comm_size(a, b)    (*(b) = 1, MPI_SUCCESS)
-#define MPI_Finalize()         MPI_SUCCESS
+#define MPI_Init(a, b)      MPI_SUCCESS
+#define MPI_Comm_rank(a, b) (*(b) = 0, MPI_SUCCESS)
+#define MPI_Comm_size(a, b) (*(b) = 1, MPI_SUCCESS)
+#define MPI_Finalize()      MPI_SUCCESS
 #endif
 
 extern int json_scanner_lex_destroy(void);
@@ -79,7 +79,7 @@ int main(int argc, char* argv[]) {
   setenv("OMP_WAIT_POLICY", "ACTIVE", 1);
   omp_set_num_threads(options->thread_count);
 
-  #pragma omp parallel
+#pragma omp parallel
   fprintf(
       stderr,
       "StrasGPT OpenMP thread %2d (total %2d) of MPI rank %2d (total %2d)\n",
@@ -182,7 +182,7 @@ int main(int argc, char* argv[]) {
 
   // Prepare to get prediction results
   size_t generated_count = 0; // Number of tokens generated so far
-  size_t vocabulary_len = 0; // Will be filled by transformer_logits_malloc
+  size_t vocabulary_len = 0;  // Will be filled by transformer_logits_malloc
   float* logits = transformer_logits_malloc(transformer, 1, &vocabulary_len);
 
   // First achieve prompt processing (prefill):
