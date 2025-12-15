@@ -805,7 +805,7 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   util_matrix_summary(s, 1, mha_kv_len, 3, w->mha_k_weight);
 
   snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "mha_v", mha_v_gb);
-  util_matrix_summary(s, 1, mha_kv_len, 3, w->mha_k_weight);
+  util_matrix_summary(s, 1, mha_kv_len, 3, w->mha_v_weight);
 
   snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "mha_out", mha_out_gb);
   util_matrix_summary(s, 1, mha_out_len, 3, w->mha_out_weight);
