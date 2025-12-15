@@ -58,13 +58,7 @@ static double peak_rss_gb(void) {
 }
 
 int main(int argc, char* argv[]) {
-  // Prepare all the components needed for text generation:
-  // - Options from command line arguments
-  options_t* options = options_read(argc, argv);
-  options_print(stderr, options);
-  fprintf(stderr, "\n");
-
-  // Let all processes and threads print their IDs
+  // Initialize MPI first to get rank for conditional printing
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) {
     UTIL_DIE("MPI_Init failed");
   }
@@ -73,6 +67,14 @@ int main(int argc, char* argv[]) {
   }
   if (MPI_Comm_size(MPI_COMM_WORLD, &mpi_size) != MPI_SUCCESS) {
     UTIL_DIE("MPI_Comm_size failed");
+  }
+
+  // Prepare all the components needed for text generation:
+  // - Options from command line arguments
+  options_t* options = options_read(argc, argv);
+  if (mpi_rank == 0) {
+    options_print(stderr, options);
+    fprintf(stderr, "\n");
   }
 
   // Set OpenMP parameters
@@ -96,16 +98,26 @@ int main(int argc, char* argv[]) {
   // - Safetensors model files
   safetensors_t* safetensors = safetensors_read(options);
   if (options->show_safetensors) {
-    safetensors_print(stderr, safetensors);
+    if (mpi_rank == 0) {
+      safetensors_print(stderr, safetensors);
+    }
     safetensors_free(safetensors);
     options_free(options);
+    if (MPI_Finalize() != MPI_SUCCESS) {
+      UTIL_DIE("MPI_Finalize failed");
+    }
     return EXIT_SUCCESS;
   }
 
   if (options->show_model) {
-    safetensors_print_model_infos(stderr, safetensors);
+    if (mpi_rank == 0) {
+      safetensors_print_model_infos(stderr, safetensors);
+    }
     safetensors_free(safetensors);
     options_free(options);
+    if (MPI_Finalize() != MPI_SUCCESS) {
+      UTIL_DIE("MPI_Finalize failed");
+    }
     return EXIT_SUCCESS;
   }
 
@@ -113,18 +125,24 @@ int main(int argc, char* argv[]) {
   tokenizer_t* tokenizer = tokenizer_read(options);
   tokenizer->bos_token_id = safetensors->bos_token_id;
   tokenizer->eos_token_id = safetensors->eos_token_id;
-  tokenizer_print(stderr, tokenizer);
-  fprintf(stderr, "\n");
+  if (mpi_rank == 0) {
+    tokenizer_print(stderr, tokenizer);
+    fprintf(stderr, "\n");
+  }
 
   // - Transformer model from safetensors
   transformer_t* transformer = transformer_from_safetensors(safetensors);
-  transformer_print(stderr, transformer);
-  fprintf(stderr, "\n");
+  if (mpi_rank == 0) {
+    transformer_print(stderr, transformer);
+    fprintf(stderr, "\n");
+  }
 
   // - Sampler for next-token selection
   sampler_t* sampler = sampler_build(options, transformer);
-  sampler_print(stderr, sampler);
-  fprintf(stderr, "\n");
+  if (mpi_rank == 0) {
+    sampler_print(stderr, sampler);
+    fprintf(stderr, "\n");
+  }
 
   // Get the prompt, either from file or command line argument
   char* prompt = NULL;
@@ -163,16 +181,18 @@ int main(int argc, char* argv[]) {
   if (token_count < 1) {
     UTIL_ERROR("expected at least 1 prompt token");
   }
-  tokenizer_print_tokens(tokenizer, stderr, token_count, token, 4);
-  fprintf(stderr, "\n");
+  if (mpi_rank == 0) {
+    tokenizer_print_tokens(tokenizer, stderr, token_count, token, 4);
+    fprintf(stderr, "\n");
 
-  // Print the prompt string (in blue)
-  fprintf(stderr, "\033[1;34m");
-  while (*prompt) {
-    fprintf(stderr, "%c", *prompt);
-    prompt++;
+    // Print the prompt string (in blue)
+    fprintf(stderr, "\033[1;34m");
+    while (*prompt) {
+      fprintf(stderr, "%c", *prompt);
+      prompt++;
+    }
+    fprintf(stderr, "\033[0m");
   }
-  fprintf(stderr, "\033[0m");
 
   // Prepare timing
   long start = 0;
@@ -196,7 +216,10 @@ int main(int argc, char* argv[]) {
   // - Decode the token into a string
   char* predicted_string = tokenizer_decode(tokenizer, predicted_token);
   // - Print the token string
-  tokenizer_print_token_string(stdout, predicted_string);
+  if (mpi_rank == 0) {
+    tokenizer_print_token_string(stdout, predicted_string);
+    fflush(stdout);
+  }
   generated_count++;
 
   // Then achieve token generation (decode), one by one
@@ -210,34 +233,47 @@ int main(int argc, char* argv[]) {
     generated_count++;
     if (predicted_token != tokenizer->eos_token_id) {
       predicted_string = tokenizer_decode(tokenizer, predicted_token);
-      tokenizer_print_token_string(stdout, predicted_string);
+      if (mpi_rank == 0) {
+        tokenizer_print_token_string(stdout, predicted_string);
+        fflush(stdout);
+      }
     } else {
       // End of string token, stop generating
-      fprintf(stdout, "%s", TOKENIZER_STRING_TOKEN_EOS);
+      if (mpi_rank == 0) {
+        fprintf(stdout, "%s", TOKENIZER_STRING_TOKEN_EOS);
+        fflush(stdout);
+      }
       break;
     }
   }
-  printf("\n");
+  if (mpi_rank == 0) {
+    printf("\n");
+    fflush(stdout);
+  }
 
   // Report maximum memory usage by the process
-  fprintf(stderr, "\nMax memory used (RSS): %.2f GB", peak_rss_gb());
+  if (mpi_rank == 0) {
+    fprintf(stderr, "\nMax memory used (RSS): %.2f GB", peak_rss_gb());
 
-  // Report achieved tok/s
-  fprintf(
-      stderr,
-      "\nPrompt processing (prefill): %4zu tokens in %7.3f s (%f token/s)\n",
-      token_count,
-      prefill_time,
-      token_count / prefill_time
-  );
-  if (generated_count > 1) {
+    // Report achieved tok/s
     fprintf(
         stderr,
-        "Token generation  (decode):  %4zu tokens in %7.3f s (%f token/s)\n",
-        (generated_count - 1),
-        decode_time,
-        (generated_count - 1) / decode_time
+        "\nPrompt processing (prefill): %4zu tokens in %7.3f s (%f "
+        "token/s)\n",
+        token_count,
+        prefill_time,
+        token_count / prefill_time
     );
+    if (generated_count > 1) {
+      fprintf(
+          stderr,
+          "Token generation  (decode):  %4zu tokens in %7.3f s (%f "
+          "token/s)\n",
+          (generated_count - 1),
+          decode_time,
+          (generated_count - 1) / decode_time
+      );
+    }
   }
 
   // Cleanup
