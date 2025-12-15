@@ -864,7 +864,7 @@ static void rmsnorm(
     uint16_t w[embedding_dim],
     float epsilon
 ) {
-#pragma omp for
+#pragma omp for schedule(static)
   for (size_t i = 0; i < sequence_len; i++) {
     // Calculate sum of squares
     float ss = 0.0f;
@@ -877,37 +877,6 @@ static void rmsnorm(
     // Normalize and scale
     for (size_t j = 0; j < embedding_dim; j++) {
       y[i][j] = util_bf16_to_f32(w[j]) * (ss * x[i][j]);
-    }
-  }
-}
-
-// Softmax operation on rows of x:
-// converts a vector of real numbers into a probability distribution
-// where each value is in the range ]0, 1[ and the sum is 1, such that
-// larger input values correspond to larger output probabilities.
-static void softmax(
-    size_t sequence_len,
-    size_t past,
-    size_t context_len,
-    float x[sequence_len][context_len]
-) {
-  for (size_t i = 0; i < sequence_len; i++) {
-    // Find max value (for numerical stability)
-    float max_val = x[i][0];
-    for (size_t j = 1; j < past + i + 1; j++) {
-      if (x[i][j] > max_val) {
-        max_val = x[i][j];
-      }
-    }
-    // Exp and sum
-    float sum = 0.0f;
-    for (size_t j = 0; j < past + i + 1; j++) {
-      x[i][j] = expf(x[i][j] - max_val);
-      sum += x[i][j];
-    }
-    // Normalize
-    for (size_t j = 0; j < past + i + 1; j++) {
-      x[i][j] /= sum;
     }
   }
 }
@@ -1119,7 +1088,7 @@ static void transformer_predict_chunk(
 #pragma omp parallel
   {
     // Convert token ids to embedding vector representation
-#pragma omp for collapse(2)
+#pragma omp for collapse(2) schedule(static)
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < embedding_dim; e++) {
         embedding[t][e] = util_bf16_to_f32(embedding_weight[token[t]][e]);
@@ -1153,7 +1122,7 @@ static void transformer_predict_chunk(
       );
 
       // Q matmul for all Q-heads
-#pragma omp for collapse(4)
+#pragma omp for collapse(4) schedule(static) nowait
       for (size_t k = 0; k < kv_head_count; k++) {
         for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
           for (size_t t = 0; t < token_count; t++) {
@@ -1167,7 +1136,7 @@ static void transformer_predict_chunk(
 
       // K matmul for all KV-heads, storing in the k_cache
       // + V matmul for all KV-heads, storing in the v_cache
-#pragma omp for collapse(3)
+#pragma omp for collapse(3) schedule(static)
       for (size_t k = 0; k < kv_head_count; k++) {
         for (size_t t = 0; t < token_count; t++) {
           for (size_t h = 0; h < head_dim; h++) {
@@ -1180,7 +1149,7 @@ static void transformer_predict_chunk(
       }
 
       // RoPE Q for all Q-heads: complex-valued rotate Q in each head
-#pragma omp for collapse(4)
+#pragma omp for collapse(4) schedule(static) nowait
       for (size_t k = 0; k < kv_head_count; k++) {
         for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
           for (size_t t = 0; t < token_count; t++) {
@@ -1197,7 +1166,7 @@ static void transformer_predict_chunk(
       }
 
       // RoPE K for all KV-heads: complex-valued rotate K in each head
-#pragma omp for collapse(3)
+#pragma omp for collapse(3) schedule(static)
       for (size_t k = 0; k < kv_head_count; k++) {
         for (size_t t = 0; t < token_count; t++) {
           for (size_t h = 0; h < head_dim; h += 2) {
@@ -1212,7 +1181,7 @@ static void transformer_predict_chunk(
       }
 
       // Multihead attention. iterate over all Q-heads
-#pragma omp for collapse(2)
+#pragma omp for collapse(2) schedule(dynamic)
       for (size_t k = 0; k < kv_head_count; k++) {
         for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
           for (size_t t = 0; t < token_count; t++) {
@@ -1227,12 +1196,26 @@ static void transformer_predict_chunk(
               }
               mha_score[k][q][t][p] /= sqrtf(head_dim);
             }
-          }
 
-          // Softmax the scores to get attention weights
-          softmax(token_count, cached_count, context_len, mha_score[k][q]);
+            // Softmax the scores to get attention weights
+            // Find max value (for numerical stability)
+            float max_val = mha_score[k][q][t][0];
+            for (size_t j = 1; j < cached_count + t + 1; j++) {
+              if (mha_score[k][q][t][j] > max_val) {
+                max_val = mha_score[k][q][t][j];
+              }
+            }
+            // Exp and sum
+            float sum = 0.0f;
+            for (size_t j = 0; j < cached_count + t + 1; j++) {
+              mha_score[k][q][t][j] = expf(mha_score[k][q][t][j] - max_val);
+              sum += mha_score[k][q][t][j];
+            }
+            // Normalize
+            for (size_t j = 0; j < cached_count + t + 1; j++) {
+              mha_score[k][q][t][j] /= sum;
+            }
 
-          for (size_t t = 0; t < token_count; t++) {
             // Weighted sum of the values, here the access function of
             // mha_att is to please the output matmul
             for (size_t h = 0; h < head_dim; h++) {
@@ -1252,7 +1235,7 @@ static void transformer_predict_chunk(
       // Note we reshape mha_att[t][k][q][h] to mha_att[t][kqh] with
       // 0 <= kqh < embedding_dim (just casting because memory layout is ok)
       // + Residual connection back into x
-#pragma omp for collapse(2)
+#pragma omp for collapse(2) schedule(static)
       for (size_t t = 0; t < token_count; t++) {
         for (size_t e = 0; e < embedding_dim; e++) {
           mha_out[t][e] =
@@ -1276,7 +1259,7 @@ static void transformer_predict_chunk(
       // Feed-forward's fully-connected matmul (a.k.a. gate)
       // + Feed-forward's up matmul
       // + SwiGLU non-linearity
-#pragma omp for collapse(2)
+#pragma omp for collapse(2) schedule(static)
       for (size_t t = 0; t < token_count; t++) {
         for (size_t h = 0; h < hidden_dim; h++) {
           ffn_fc[t][h] = dot(embedding_dim, ffn_norm[t], ffn_fc_weight[l][h]);
@@ -1290,7 +1273,7 @@ static void transformer_predict_chunk(
 
       // Final matmul to get the output of the feed-forward network
       // + Residual connection
-#pragma omp for collapse(2)
+#pragma omp for collapse(2) schedule(static)
       for (size_t t = 0; t < token_count; t++) {
         for (size_t e = 0; e < embedding_dim; e++) {
           ffn_out[t][e] = dot(hidden_dim, ffn_fc[t], ffn_out_weight[l][e]);
@@ -1343,7 +1326,7 @@ static void transformer_predict_chunk(
       );
 
       // Classifier into logits
-#pragma omp for collapse(2)
+#pragma omp for collapse(2) schedule(static)
       for (size_t l = 0; l < logits_count; l++) {
         for (size_t v = 0; v < vocabulary_len; v++) {
           logits[l][v] =
