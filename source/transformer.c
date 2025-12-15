@@ -13,6 +13,42 @@
 #include <sys/types.h> // for size_t, off_t
 #include <unistd.h>    // for close()
 
+#ifdef PARALLEL
+#include <mpi.h>
+#else
+#define MPI_SUCCESS       0
+#define MPI_COMM_WORLD    0
+#define MPI_FLOAT         0
+#define MPI_STATUS_IGNORE NULL
+#define MPI_Send(...)     ((void)0)
+#define MPI_Recv(...)     ((void)0)
+#endif
+
+extern int mpi_rank, mpi_size;
+
+typedef struct {
+  size_t start_layer;
+  size_t local_layer_count;
+} layer_range_t;
+
+static layer_range_t compute_layer_range(size_t layer_count) {
+  layer_range_t range;
+
+  size_t layers_per_rank = layer_count / mpi_size;
+  size_t remainder = layer_count % mpi_size;
+
+  if ((size_t)mpi_rank < remainder) {
+    range.start_layer = (size_t)mpi_rank * (layers_per_rank + 1);
+    range.local_layer_count = layers_per_rank + 1;
+  } else {
+    range.start_layer = remainder * (layers_per_rank + 1) +
+                        ((size_t)mpi_rank - remainder) * layers_per_rank;
+    range.local_layer_count = layers_per_rank;
+  }
+
+  return range;
+}
+
 // Create a transformer_configuration_t structure from a safetensors_t
 static transformer_configuration_t* configuration_from_safetensors(
     safetensors_t* safetensors
@@ -41,13 +77,16 @@ static transformer_state_t* state_from_safetensors(safetensors_t* t) {
     UTIL_DIE("failed to malloc for transformer_state_t");
   }
 
+  layer_range_t layer_range = compute_layer_range(t->layer_count);
+  size_t local_layer_count = layer_range.local_layer_count;
+
   size_t chunk_max_len = TRANSFORMER_CHUNK_MAX_LEN;
   size_t kv_dim = t->head_dim * t->kv_head_count;
   size_t embedding_len = chunk_max_len * t->embedding_dim;
   size_t mha_att_len = chunk_max_len * t->q_head_count * t->head_dim;
   size_t hidden_len = chunk_max_len * t->hidden_dim;
   size_t score_len = t->q_head_count * chunk_max_len * t->context_len;
-  size_t cache_len = t->context_len * t->layer_count * kv_dim;
+  size_t cache_len = t->context_len * local_layer_count * kv_dim;
   size_t logits_len = chunk_max_len * t->vocabulary_len;
   size_t rope_len = t->context_len * t->head_dim;
 
@@ -259,11 +298,13 @@ static void load_mha_norm_weight(
     UTIL_DIE("unexpected size for mha norm weight");
   }
 
+  size_t local_index = index - weights->start_layer;
+
   load_data(
       safetensors->file[tensor->file],
       tensor->offset,
       tensor->size,
-      &weights->mha_norm_weight[index * len]
+      &weights->mha_norm_weight[local_index * len]
   );
 }
 
@@ -279,11 +320,13 @@ static void load_mha_q_weight(
     UTIL_DIE("unexpected size for mha q weight");
   }
 
+  size_t local_index = index - weights->start_layer;
+
   load_data(
       safetensors->file[tensor->file],
       tensor->offset,
       tensor->size,
-      &weights->mha_q_weight[index * len]
+      &weights->mha_q_weight[local_index * len]
   );
 
   // Permute the weight from Hugging Face layout to Meta layout
@@ -291,7 +334,7 @@ static void load_mha_q_weight(
       safetensors->q_head_count * safetensors->head_dim,
       safetensors->embedding_dim,
       safetensors->q_head_count,
-      &weights->mha_q_weight[index * len]
+      &weights->mha_q_weight[local_index * len]
   );
 }
 
@@ -307,11 +350,13 @@ static void load_mha_k_weight(
     UTIL_DIE("unexpected size for mha k weight");
   }
 
+  size_t local_index = index - weights->start_layer;
+
   load_data(
       safetensors->file[tensor->file],
       tensor->offset,
       tensor->size,
-      &weights->mha_k_weight[index * len]
+      &weights->mha_k_weight[local_index * len]
   );
 
   // Permute the weight from Hugging Face layout to Meta layout
@@ -319,7 +364,7 @@ static void load_mha_k_weight(
       safetensors->kv_head_count * safetensors->head_dim,
       safetensors->embedding_dim,
       safetensors->kv_head_count,
-      &weights->mha_k_weight[index * len]
+      &weights->mha_k_weight[local_index * len]
   );
 }
 
@@ -335,11 +380,13 @@ static void load_mha_v_weight(
     UTIL_DIE("unexpected size for mha v weight");
   }
 
+  size_t local_index = index - weights->start_layer;
+
   load_data(
       safetensors->file[tensor->file],
       tensor->offset,
       tensor->size,
-      &weights->mha_v_weight[index * len]
+      &weights->mha_v_weight[local_index * len]
   );
 }
 
@@ -355,11 +402,13 @@ static void load_mha_out_weight(
     UTIL_DIE("unexpected size for mha out weight");
   }
 
+  size_t local_index = index - weights->start_layer;
+
   load_data(
       safetensors->file[tensor->file],
       tensor->offset,
       tensor->size,
-      &weights->mha_out_weight[index * len]
+      &weights->mha_out_weight[local_index * len]
   );
 }
 
@@ -374,11 +423,13 @@ static void load_ffn_norm_weight(
     UTIL_DIE("unexpected size for ffn norm weight");
   }
 
+  size_t local_index = index - weights->start_layer;
+
   load_data(
       safetensors->file[tensor->file],
       tensor->offset,
       tensor->size,
-      &weights->ffn_norm_weight[index * len]
+      &weights->ffn_norm_weight[local_index * len]
   );
 }
 
@@ -393,11 +444,13 @@ static void load_ffn_fc_weight(
     UTIL_DIE("unexpected size for ffn fc weight");
   }
 
+  size_t local_index = index - weights->start_layer;
+
   load_data(
       safetensors->file[tensor->file],
       tensor->offset,
       tensor->size,
-      &weights->ffn_fc_weight[index * len]
+      &weights->ffn_fc_weight[local_index * len]
   );
 }
 
@@ -412,11 +465,13 @@ static void load_ffn_up_weight(
     UTIL_DIE("unexpected size for ffn up weight");
   }
 
+  size_t local_index = index - weights->start_layer;
+
   load_data(
       safetensors->file[tensor->file],
       tensor->offset,
       tensor->size,
-      &weights->ffn_up_weight[index * len]
+      &weights->ffn_up_weight[local_index * len]
   );
 }
 
@@ -431,11 +486,13 @@ static void load_ffn_out_weight(
     UTIL_DIE("unexpected size for ffn out weight");
   }
 
+  size_t local_index = index - weights->start_layer;
+
   load_data(
       safetensors->file[tensor->file],
       tensor->offset,
       tensor->size,
-      &weights->ffn_out_weight[index * len]
+      &weights->ffn_out_weight[local_index * len]
   );
 }
 
@@ -497,6 +554,18 @@ static bool tensor_load(
     const safetensors_t* safetensors,
     transformer_weights_t* weights
 ) {
+  const char* name = tensor->name;
+
+  if (strstr(name, "model.layers.") == name) {
+    size_t layer_index = 0;
+    sscanf(name, "model.layers.%zu", &layer_index);
+
+    if (layer_index < weights->start_layer ||
+        layer_index >= weights->start_layer + weights->local_layer_count) {
+      return true;
+    }
+  }
+
   const tensor_load_t loading_table[] = {
       {SAFETENSORS_PATTERN_EMBEDDING_WEIGHT, load_embedding_weight},
       {SAFETENSORS_PATTERN_MHA_NORM_WEIGHT, load_mha_norm_weight},
@@ -514,7 +583,6 @@ static bool tensor_load(
   size_t route_count = sizeof(loading_table) / sizeof(loading_table[0]);
 
   for (size_t i = 0; i < route_count; i++) {
-    const char* name = tensor->name;
     size_t index = 0; // Will be set by match_name(), then unused
 
     if (match_name(name, loading_table[i].pattern, &index)) {
@@ -532,18 +600,22 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
     UTIL_DIE("failed to malloc for transformer_weights_t");
   }
 
+  layer_range_t layer_range = compute_layer_range(t->layer_count);
+  size_t start_layer = layer_range.start_layer;
+  size_t local_layer_count = layer_range.local_layer_count;
+
   size_t qkv_weight_dim = t->head_dim * t->embedding_dim;
 
   size_t embedding_len = t->vocabulary_len * t->embedding_dim;
-  size_t mha_norm_len = t->layer_count * t->embedding_dim;
-  size_t mha_q_len = t->layer_count * t->q_head_count * qkv_weight_dim;
-  size_t mha_kv_len = t->layer_count * t->kv_head_count * qkv_weight_dim;
+  size_t mha_norm_len = local_layer_count * t->embedding_dim;
+  size_t mha_q_len = local_layer_count * t->q_head_count * qkv_weight_dim;
+  size_t mha_kv_len = local_layer_count * t->kv_head_count * qkv_weight_dim;
   size_t mha_out_dim = t->q_head_count * t->head_dim;
-  size_t mha_out_len = t->layer_count * t->embedding_dim * mha_out_dim;
-  size_t ffn_norm_len = t->layer_count * t->embedding_dim;
-  size_t ffn_fc_len = t->layer_count * t->embedding_dim * t->hidden_dim;
-  size_t ffn_up_len = t->layer_count * t->embedding_dim * t->hidden_dim;
-  size_t ffn_out_len = t->layer_count * t->hidden_dim * t->embedding_dim;
+  size_t mha_out_len = local_layer_count * t->embedding_dim * mha_out_dim;
+  size_t ffn_norm_len = local_layer_count * t->embedding_dim;
+  size_t ffn_fc_len = local_layer_count * t->embedding_dim * t->hidden_dim;
+  size_t ffn_up_len = local_layer_count * t->embedding_dim * t->hidden_dim;
+  size_t ffn_out_len = local_layer_count * t->hidden_dim * t->embedding_dim;
   size_t out_norm_len = t->embedding_dim;
   size_t out_len = t->vocabulary_len * t->embedding_dim;
 
@@ -558,6 +630,9 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
   size_t ffn_out_size = ffn_out_len * sizeof(*w->ffn_out_weight);
   size_t out_norm_size = out_norm_len * sizeof(*w->out_norm_weight);
   size_t out_size = out_len * sizeof(*w->out_weight);
+
+  w->start_layer = start_layer;
+  w->local_layer_count = local_layer_count;
 
   w->embedding_weight = aligned_alloc(UTIL_ALIGNMENT, embedding_size);
   w->mha_norm_weight = aligned_alloc(UTIL_ALIGNMENT, mha_norm_size);
@@ -1051,6 +1126,19 @@ static void transformer_predict_chunk(
       }
     }
 
+    if (mpi_size > 1 && mpi_rank > 0) {
+#pragma omp single
+      MPI_Recv(
+          embedding,
+          token_count * embedding_dim,
+          MPI_FLOAT,
+          mpi_rank - 1,
+          0,
+          MPI_COMM_WORLD,
+          MPI_STATUS_IGNORE
+      );
+    }
+
     // Execute decoder layers
     for (size_t l = 0; l < layer_count; l++) {
       // Attention rmsnorm: normalize the embedding vectors for the current
@@ -1231,25 +1319,57 @@ static void transformer_predict_chunk(
 #endif
     }
 
-    // Final rmsnorm
-    rmsnorm(
-        token_count,
-        embedding_dim,
-        embedding,
-        embedding,
-        out_norm_weight,
-        epsilon
-    );
+    if (mpi_size > 1 && mpi_rank < mpi_size - 1) {
+#pragma omp single
+      MPI_Send(
+          embedding,
+          token_count * embedding_dim,
+          MPI_FLOAT,
+          mpi_rank + 1,
+          0,
+          MPI_COMM_WORLD
+      );
+    }
 
-    // Classifier into logits
+    if (mpi_rank == mpi_size - 1) {
+      // Final rmsnorm
+      rmsnorm(
+          token_count,
+          embedding_dim,
+          embedding,
+          embedding,
+          out_norm_weight,
+          epsilon
+      );
+
+      // Classifier into logits
 #pragma omp for collapse(2)
-    for (size_t l = 0; l < logits_count; l++) {
-      for (size_t v = 0; v < vocabulary_len; v++) {
-        logits[l][v] =
-            dot(embedding_dim,
-                embedding[l + token_count - logits_count],
-                out_weight[v]);
+      for (size_t l = 0; l < logits_count; l++) {
+        for (size_t v = 0; v < vocabulary_len; v++) {
+          logits[l][v] =
+              dot(embedding_dim,
+                  embedding[l + token_count - logits_count],
+                  out_weight[v]);
+        }
       }
+    }
+  }
+
+  if (mpi_size > 1) {
+    if (mpi_rank == mpi_size - 1) {
+      MPI_Send(
+          logits, logits_count * vocabulary_len, MPI_FLOAT, 0, 1, MPI_COMM_WORLD
+      );
+    } else if (mpi_rank == 0) {
+      MPI_Recv(
+          logits,
+          logits_count * vocabulary_len,
+          MPI_FLOAT,
+          mpi_size - 1,
+          1,
+          MPI_COMM_WORLD,
+          MPI_STATUS_IGNORE
+      );
     }
   }
 }
@@ -1278,7 +1398,7 @@ void transformer_predict(
 
   size_t vocabulary_len = c->vocabulary_len;
   size_t context_len = c->context_len;
-  size_t layer_count = c->layer_count;
+  size_t layer_count = w->local_layer_count;
   size_t q_head_count = c->q_head_count;
   size_t kv_head_count = c->kv_head_count;
   size_t q_head_per_kv_head_count = q_head_count / kv_head_count;
