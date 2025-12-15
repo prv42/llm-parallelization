@@ -23,6 +23,8 @@ typedef struct transformer_configuration {
 } transformer_configuration_t;
 
 typedef struct transformer_weights {
+  size_t start_layer;
+  size_t local_layer_count;
   // Embedding parameter set
   uint16_t* embedding_weight; // [vocabulary_len][embedding_dim]
   // Decoder parameter set
