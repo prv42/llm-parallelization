@@ -740,6 +740,7 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   }
 
   transformer_configuration_t* c = transformer->config;
+  transformer_weights_t* w = transformer->weights;
 
   fprintf(f, "Transformer:\n");
   fprintf(f, "- Configuration:\n");
@@ -758,19 +759,18 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   size_t qkv_weight_dim = c->head_dim * c->embedding_dim;
 
   size_t embedding_len = c->vocabulary_len * c->embedding_dim;
-  size_t mha_norm_len = c->layer_count * c->embedding_dim;
-  size_t mha_q_len = c->layer_count * c->q_head_count * qkv_weight_dim;
-  size_t mha_kv_len = c->layer_count * c->kv_head_count * qkv_weight_dim;
+  size_t mha_norm_len = w->local_layer_count * c->embedding_dim;
+  size_t mha_q_len = w->local_layer_count * c->q_head_count * qkv_weight_dim;
+  size_t mha_kv_len = w->local_layer_count * c->kv_head_count * qkv_weight_dim;
   size_t mha_out_dim = c->q_head_count * c->head_dim;
-  size_t mha_out_len = c->layer_count * c->embedding_dim * mha_out_dim;
-  size_t ffn_norm_len = c->layer_count * c->embedding_dim;
-  size_t ffn_fc_len = c->layer_count * c->embedding_dim * c->hidden_dim;
-  size_t ffn_up_len = c->layer_count * c->embedding_dim * c->hidden_dim;
-  size_t ffn_out_len = c->layer_count * c->hidden_dim * c->embedding_dim;
+  size_t mha_out_len = w->local_layer_count * c->embedding_dim * mha_out_dim;
+  size_t ffn_norm_len = w->local_layer_count * c->embedding_dim;
+  size_t ffn_fc_len = w->local_layer_count * c->embedding_dim * c->hidden_dim;
+  size_t ffn_up_len = w->local_layer_count * c->embedding_dim * c->hidden_dim;
+  size_t ffn_out_len = w->local_layer_count * c->hidden_dim * c->embedding_dim;
   size_t out_norm_len = c->embedding_dim;
   size_t out_len = c->vocabulary_len * c->embedding_dim;
 
-  transformer_weights_t* w = transformer->weights;
   double gb = 1024 * 1024 * 1024;
   double embedding_gb = (embedding_len * sizeof(*w->embedding_weight)) / gb;
   double mha_norm_gb = (mha_norm_len * sizeof(*w->mha_norm_weight)) / gb;
